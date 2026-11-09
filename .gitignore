@@ -1,0 +1,13 @@
+# build artifacts
+/target
+/boot_signer
+*.img
+
+# test scratch
+ft_*
+demo*
+extracted/
+BootSignature.java
+
+# tooling
+.openclaw/
