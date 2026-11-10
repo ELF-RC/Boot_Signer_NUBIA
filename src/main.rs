@@ -1,4 +1,5 @@
 mod bootimg;
+mod crypto;
 mod der;
 
 fn main() {
