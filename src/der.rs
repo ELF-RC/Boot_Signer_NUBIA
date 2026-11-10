@@ -189,3 +189,70 @@ pub fn int_to_bytes(content: &[u8]) -> Result<Vec<u8>, String> {
     Ok(v)
 }
 
+/// Base64 decode (standard alphabet, ignores whitespace/line breaks).
+pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rev = [0u8; 256];
+    for (i, &c) in TABLE.iter().enumerate() {
+        rev[c as usize] = i as u8;
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut nbits = 0;
+    for c in s.bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' || c == b' ' || c == b'\t' {
+            continue;
+        }
+        let v = rev[c as usize];
+        if v == 0 && c != b'A' {
+            return Err("base64: bad char".to_string());
+        }
+        acc = (acc << 6) | v as u32;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+            acc &= (1 << nbits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Decode PEM block (BEGIN..END) into DER.
+pub fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
+    let mut b64 = String::new();
+    let mut inside = false;
+    for line in pem.lines() {
+        let line = line.trim();
+        if line.starts_with("-----BEGIN") {
+            inside = true;
+            continue;
+        }
+        if line.starts_with("-----END") {
+            break;
+        }
+        if inside {
+            b64.push_str(line);
+        }
+    }
+    if b64.is_empty() {
+        return Err("PEM: no data".to_string());
+    }
+    base64_decode(&b64)
+}
+
+/// Accept either a PEM or raw DER blob and return DER bytes.
+pub fn pem_or_der(raw: &[u8], what: &str) -> Result<Vec<u8>, String> {
+    const BEGIN: &[u8] = b"-----BEGIN"; // 10 bytes
+    let is_pem = raw.windows(BEGIN.len()).any(|w| w == BEGIN);
+    if is_pem {
+        let s = std::str::from_utf8(raw)
+            .map_err(|_| format!("{what}: invalid PEM (not UTF-8)"))?;
+        pem_to_der(s)
+    } else if raw.is_empty() {
+        Err(format!("{what}: empty file"))
+    } else {
+        Ok(raw.to_vec())
+    }
+}
