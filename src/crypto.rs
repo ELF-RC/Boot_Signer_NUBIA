@@ -11,7 +11,7 @@
 
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use sha1::Sha1;
+use sha1::{Digest as _, Sha1};
 use sha2::{Sha256, Sha512};
 
 pub const OID_SHA1_RSA: &str = "1.2.840.113549.1.1.5";
@@ -68,9 +68,12 @@ pub fn public_key_from_cert(cert_der: &[u8]) -> Result<PubKey, String> {
 /// RSA: PKCS#1 v1.5 (deterministic).
 pub fn sign(key: &PrivKey, msg: &[u8]) -> Result<Vec<u8>, String> {
     match key {
-        PrivKey::Rsa(k) => k
-            .sign(Pkcs1v15Sign::new::<Sha256>(), msg)
-            .map_err(|e| format!("RSA sign failed: {e}")),
+        PrivKey::Rsa(k) => {
+            // JCE SHA256withRSA = EMSA-PKCS1-v1_5(DigestInfo(SHA256, msg))
+            let digest = Sha256::digest(msg);
+            k.sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
+                .map_err(|e| format!("RSA sign failed: {e}"))
+        }
     }
 }
 
@@ -85,13 +88,18 @@ pub fn verify_with_oid(key: &PubKey, msg: &[u8], sig: &[u8], alg_oid: &str) -> R
 fn verify_named(key: &PubKey, msg: &[u8], sig: &[u8], alg: &str) -> Result<bool, String> {
     match (key, alg) {
         (PubKey::Rsa(k), "SHA256withRSA") => {
-            Ok(k.verify(Pkcs1v15Sign::new::<Sha256>(), msg, sig).is_ok())
+            let digest = Sha256::digest(msg);
+            Ok(k.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, sig)
+                .is_ok())
         }
         (PubKey::Rsa(k), "SHA1withRSA") => {
-            Ok(k.verify(Pkcs1v15Sign::new::<Sha1>(), msg, sig).is_ok())
+            let digest = Sha1::digest(msg);
+            Ok(k.verify(Pkcs1v15Sign::new::<Sha1>(), &digest, sig).is_ok())
         }
         (PubKey::Rsa(k), "SHA512withRSA") => {
-            Ok(k.verify(Pkcs1v15Sign::new::<Sha512>(), msg, sig).is_ok())
+            let digest = Sha512::digest(msg);
+            Ok(k.verify(Pkcs1v15Sign::new::<Sha512>(), &digest, sig)
+                .is_ok())
         }
         _ => Err(format!("Unsupported algorithm {alg} for this key type")),
     }
