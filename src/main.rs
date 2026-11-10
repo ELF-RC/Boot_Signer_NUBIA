@@ -1,3 +1,4 @@
+mod bootimg;
 mod der;
 
 fn main() {
