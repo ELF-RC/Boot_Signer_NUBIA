@@ -52,6 +52,7 @@ arguments (sign):
 options:
   -certificate X  (verify) verify against certificate X instead of the
                   certificate embedded in the signature
+  -print-cert     print the embedded certificate (PEM) and exit
 
 exit codes: 0 = success/valid, 1 = failure/invalid, 2 = usage error";
 
@@ -327,6 +328,16 @@ fn main() {
         "-h" | "--help" => {
             println!("{USAGE}");
             exit(0);
+        }
+        "-print-cert" => {
+            // Print the embedded certificate PEM (stdout).
+            match std::str::from_utf8(embedded::DEFAULT_CERT) {
+                Ok(s) => {
+                    print!("{s}");
+                    exit(0);
+                }
+                Err(_) => fail("embedded certificate is not PEM (broken build?)"),
+            }
         }
         "-verify" => {
             // -verify <image> [-certificate <cert>]
