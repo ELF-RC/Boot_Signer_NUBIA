@@ -3,7 +3,7 @@
 //! Single-binary replacement for boot_signer.jar (AOSP com.android.verity.BootSignature).
 //!
 //! usage:
-//!   boot_signer <target> <image> <key> <cert> <out>
+//!   boot_signer <target> <image> [<key> <cert>] <out>
 //!   boot_signer -verify <image> [-certificate <cert.x509.pem>]
 //!//! Signed layout:   image[0..signableSize] || BootSignature-DER
 //! BootSignature ::= SEQUENCE {
@@ -18,6 +18,7 @@
 mod bootimg;
 mod crypto;
 mod der;
+mod embedded;
 
 use std::io::{Read, Write};
 use std::process::exit;
@@ -28,6 +29,7 @@ const USAGE: &str = "\
 boot_signer - sign/verify Android boot images (AOSP BootSignature)
 
 usage:
+  boot_signer <target> <image> <out>
   boot_signer <target> <image> <key> <cert> <out>
   boot_signer -verify <image> [-certificate <cert>]
   boot_signer -h | --help
@@ -43,6 +45,9 @@ arguments (sign):
   key     private key: PKCS#8 DER or PEM (RSA-2048/4096, P-256/P-384/P-521)
   cert    X.509 certificate, PEM or DER
   out     output file (image + signature block)
+
+  <key> and <cert> may be omitted: the AOSP verity test key pair compiled
+  into the binary is then used (single-binary mode).
 
 options:
   -certificate X  (verify) verify against certificate X instead of the
@@ -187,14 +192,20 @@ fn generate_signable_image(image: &[u8], target: &str, length: i64) -> Vec<u8> {
     out
 }
 
-/// Load a certificate (PEM or DER).
-fn load_cert(path: &str) -> Result<Vec<u8>, String> {
-    der::pem_or_der(&read_file(path)?, "certificate")
+/// Load a certificate (PEM or DER); embedded default when None.
+fn load_cert(path: Option<&str>) -> Result<Vec<u8>, String> {
+    match path {
+        Some(p) => der::pem_or_der(&read_file(p)?, "certificate"),
+        None => der::pem_or_der(embedded::DEFAULT_CERT, "embedded certificate"),
+    }
 }
 
-/// Load a private key (PKCS#8, DER or PEM).
-fn load_key(path: &str) -> Result<crypto::PrivKey, String> {
-    let der = der::pem_or_der(&read_file(path)?, "private key")?;
+/// Load a private key (PKCS#8, DER or PEM); embedded default when None.
+fn load_key(path: Option<&str>) -> Result<crypto::PrivKey, String> {
+    let der = match path {
+        Some(p) => der::pem_or_der(&read_file(p)?, "private key")?,
+        None => der::pem_or_der(embedded::DEFAULT_KEY, "embedded private key")?,
+    };
     crypto::load_pkcs8_private_key(&der)
 }
 
@@ -205,8 +216,8 @@ fn load_key(path: &str) -> Result<crypto::PrivKey, String> {
 fn do_signature(
     target: &str,
     image_path: &str,
-    key_path: &str,
-    cert_path: &str,
+    key_path: Option<&str>,
+    cert_path: Option<&str>,
     out_path: &str,
 ) {
     if target.is_empty() {
@@ -276,7 +287,7 @@ fn verify_signature(image_path: &str, cert_path: &str) -> ! {
 
         if !cert_path.is_empty() {
             eprintln!("NOTE: verifying using public key from {}", cert_path);
-            sig.cert_der = load_cert(cert_path)?;
+            sig.cert_der = load_cert(Some(cert_path))?;
         }
 
         let image = &data[..signable_size];
@@ -349,14 +360,18 @@ fn main() {
         }
         s if s.starts_with('-') => usage_err(&format!("unknown command '{s}'")),
         _ => {
-            // sign: <target> <image> <key> <cert> <out>
-            if args.len() != 5 {
-                usage_err(&format!(
-                    "sign expects <target> <image> <key> <cert> <out>, got {} arguments",
-                    args.len()
-                ));
+            // sign: <target> <image> [<key> <cert>] <out>
+            let pos: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            match pos.len() {
+                // <target> <image> <out> — embedded key/cert
+                3 => do_signature(pos[0], pos[1], None, None, pos[2]),
+                // <target> <image> <key> <cert> <out> — explicit key/cert
+                5 => do_signature(pos[0], pos[1], Some(pos[2]), Some(pos[3]), pos[4]),
+                n => usage_err(&format!(
+                    "sign expects 3 (<target> <image> <out>) or 5 \
+                     (<target> <image> <key> <cert> <out>) arguments, got {n}"
+                )),
             }
-            do_signature(&args[0], &args[1], &args[2], &args[3], &args[4]);
         }
     }
 }
