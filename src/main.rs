@@ -47,7 +47,7 @@ arguments (sign):
   image   boot image to sign (ANDROID! header; extra trailing bytes are
           discarded unless --no-truncate is given)
   key     private key: PKCS#8 DER or PEM (RSA-2048/4096, P-256/P-384/P-521)
-  cert    X.509 certificate, PEM or DER
+  cert    X.509 certificate, PEM or DER (must match the private key)
   out     output file (image + signature block)
 
   <key> and <cert> may be omitted: the AOSP verity test key pair compiled
@@ -278,6 +278,18 @@ fn do_signature(
         let length = image.len() as i64;
         let key = load_key(key_path)?;
         let cert_der = load_cert(cert_path)?;
+
+        // Guard against the classic mix-up: key and certificate must match,
+        // otherwise the produced signature can never verify.
+        let cert_pub = crypto::public_key_from_cert(&cert_der)?;
+        if !crypto::key_matches_cert(&key, &cert_pub) {
+            return Err(match (key_path, cert_path) {
+                (Some(k), Some(c)) => {
+                    format!("key does not match certificate: '{k}' and '{c}' are not a pair")
+                }
+                _ => "embedded key and certificate are not a pair (broken build?)".to_string(),
+            });
+        }
 
         let (_alg_name, alg_oid) = crypto::signature_algorithm_for_priv(&key);
         let signable = generate_signable_image(&image, target, length);

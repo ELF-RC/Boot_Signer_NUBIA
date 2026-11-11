@@ -107,6 +107,19 @@ pub fn load_pkcs8_private_key(der: &[u8]) -> Result<PrivKey, String> {
     }
 }
 
+/// Check that a private key and certificate public key form a pair.
+/// (JCE: X509Certificate.getPublicKey() vs the signing key.)
+pub fn key_matches_cert(sk: &PrivKey, cert_pk: &PubKey) -> bool {
+    use rsa::traits::PublicKeyParts;
+    match (sk, cert_pk) {
+        (PrivKey::Rsa(a), PubKey::Rsa(b)) => a.n() == b.n() && a.e() == b.e(),
+        (PrivKey::P256(a), PubKey::P256(b)) => a.public_key() == *b,
+        (PrivKey::P384(a), PubKey::P384(b)) => a.public_key() == *b,
+        (PrivKey::P521(a), PubKey::P521(b)) => a.public_key() == *b,
+        _ => false,
+    }
+}
+
 /// Extract the public key from an X.509 certificate DER
 /// (CertificateFactory "X.509" + X509Certificate.getPublicKey()).
 pub fn public_key_from_cert(cert_der: &[u8]) -> Result<PubKey, String> {
