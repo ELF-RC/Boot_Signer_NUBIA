@@ -40,7 +40,7 @@ arguments (sign):
   target  partition target recorded in the signature (e.g. /boot)
   image   boot image to sign (ANDROID! header; extra trailing bytes are
           discarded)
-  key     private key: PKCS#8 DER or PEM (RSA-2048/4096)
+  key     private key: PKCS#8 DER or PEM (RSA-2048/4096, P-256/P-384/P-521)
   cert    X.509 certificate, PEM or DER
   out     output file (image + signature block)
 
