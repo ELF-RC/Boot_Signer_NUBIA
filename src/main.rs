@@ -3,9 +3,9 @@
 //! Single-binary replacement for boot_signer.jar (AOSP com.android.verity.BootSignature).
 //!
 //! usage:
-//!   boot_signer <target> <image> [<key> <cert>] <out>
+//!   boot_signer <target> <image> [<key> <cert>] <out> [--no-truncate]
 //!   boot_signer -verify <image> [-certificate <cert.x509.pem>]
-//!//! Signed layout:   image[0..signableSize] || BootSignature-DER
+//!//! Signed layout:   image[0..signableSize] || BootSignature-DER [|| trailing]
 //! BootSignature ::= SEQUENCE {
 //!     formatVersion            INTEGER (1),
 //!     certificate              <X.509 cert DER>,
@@ -29,8 +29,8 @@ const USAGE: &str = "\
 boot_signer - sign/verify Android boot images (AOSP BootSignature)
 
 usage:
-  boot_signer <target> <image> <out>
-  boot_signer <target> <image> <key> <cert> <out>
+  boot_signer <target> <image> <out> [--no-truncate]
+  boot_signer <target> <image> <key> <cert> <out> [--no-truncate]
   boot_signer -verify <image> [-certificate <cert>]
   boot_signer -h | --help
 
@@ -41,7 +41,7 @@ commands:
 arguments (sign):
   target  partition target recorded in the signature (e.g. /boot)
   image   boot image to sign (ANDROID! header; extra trailing bytes are
-          discarded)
+          discarded unless --no-truncate is given)
   key     private key: PKCS#8 DER or PEM (RSA-2048/4096, P-256/P-384/P-521)
   cert    X.509 certificate, PEM or DER
   out     output file (image + signature block)
@@ -50,6 +50,8 @@ arguments (sign):
   into the binary is then used (single-binary mode).
 
 options:
+  --no-truncate   do not discard bytes past the signable image; they are
+                  preserved behind the signature block instead of being cut
   -certificate X  (verify) verify against certificate X instead of the
                   certificate embedded in the signature
   -print-cert     print the embedded certificate (PEM) and exit
@@ -127,7 +129,8 @@ struct ParsedSig {
     signature: Vec<u8>,
 }
 
-/// Parse BootSignature DER. Any bytes after the block are ignored.
+/// Parse BootSignature DER. Any bytes after the block are ignored, so a signed
+/// image with preserved trailing data (see --no-truncate) verifies fine.
 fn parse_boot_signature(data: &[u8]) -> Result<ParsedSig, String> {
     let elems = der::parse_seq(data)?;
     if elems.len() != 5 {
@@ -220,6 +223,7 @@ fn do_signature(
     key_path: Option<&str>,
     cert_path: Option<&str>,
     out_path: &str,
+    no_truncate: bool,
 ) {
     if target.is_empty() {
         fail("Invalid argument: empty target");
@@ -231,20 +235,31 @@ fn do_signature(
         }
         let signable_size = bootimg::get_signable_image_size(&image)?;
 
-        if signable_size < image.len() {
-            eprintln!(
-                "NOTE: truncating file {} from {} to {} bytes",
-                image_path,
-                image.len(),
-                signable_size
-            );
-            image.truncate(signable_size);
+        // Handle bytes past the signable image (old signature, padding, ...).
+        let trailing: Vec<u8> = if signable_size < image.len() {
+            let rest = image.split_off(signable_size);
+            if no_truncate {
+                eprintln!(
+                    "NOTE: keeping {} trailing bytes behind the signature (--no-truncate)",
+                    rest.len()
+                );
+            } else {
+                eprintln!(
+                    "NOTE: truncating file {} from {} to {} bytes",
+                    image_path,
+                    image.len() + rest.len(),
+                    signable_size
+                );
+            }
+            rest
         } else if signable_size > image.len() {
             return Err(format!(
                 "Invalid image: too short, expected {} bytes",
                 signable_size
             ));
-        }
+        } else {
+            Vec::new()
+        };
 
         let length = image.len() as i64;
         let key = load_key(key_path)?;
@@ -255,10 +270,10 @@ fn do_signature(
         let signature = crypto::sign(&key, &signable)?;
         let bootsig = encode_boot_signature(&cert_der, alg_oid, target, length, &signature);
 
-        let mut out = Vec::with_capacity(image.len() + bootsig.len());
+        let mut out = Vec::with_capacity(image.len() + bootsig.len() + trailing.len());
         out.extend_from_slice(&image);
         out.extend_from_slice(&bootsig);
-
+        out.extend_from_slice(&trailing);
         write_file(out_path, &out)
     })();
 
@@ -371,13 +386,26 @@ fn main() {
         }
         s if s.starts_with('-') => usage_err(&format!("unknown command '{s}'")),
         _ => {
-            // sign: <target> <image> [<key> <cert>] <out>
-            let pos: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            // sign: <target> <image> [<key> <cert>] <out> [--no-truncate]
+            let mut no_truncate = false;
+            let mut pos: Vec<&str> = Vec::new();
+            for a in &args {
+                match a.as_str() {
+                    "--no-truncate" => {
+                        if no_truncate {
+                            usage_err("--no-truncate given twice");
+                        }
+                        no_truncate = true;
+                    }
+                    x if x.starts_with('-') => usage_err(&format!("unknown option '{x}'")),
+                    x => pos.push(x),
+                }
+            }
             match pos.len() {
                 // <target> <image> <out> — embedded key/cert
-                3 => do_signature(pos[0], pos[1], None, None, pos[2]),
+                3 => do_signature(pos[0], pos[1], None, None, pos[2], no_truncate),
                 // <target> <image> <key> <cert> <out> — explicit key/cert
-                5 => do_signature(pos[0], pos[1], Some(pos[2]), Some(pos[3]), pos[4]),
+                5 => do_signature(pos[0], pos[1], Some(pos[2]), Some(pos[3]), pos[4], no_truncate),
                 n => usage_err(&format!(
                     "sign expects 3 (<target> <image> <out>) or 5 \
                      (<target> <image> <key> <cert> <out>) arguments, got {n}"
