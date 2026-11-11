@@ -5,7 +5,9 @@
 //! usage:
 //!   boot_signer <target> <image> [<key> <cert>] <out> [--no-truncate]
 //!   boot_signer -verify <image> [-certificate <cert.x509.pem>]
-//!//! Signed layout:   image[0..signableSize] || BootSignature-DER [|| trailing]
+//!   boot_signer -strip <image> <out>
+//!
+//! Signed layout:   image[0..signableSize] || BootSignature-DER [|| trailing]
 //! BootSignature ::= SEQUENCE {
 //!     formatVersion            INTEGER (1),
 //!     certificate              <X.509 cert DER>,
@@ -32,11 +34,13 @@ usage:
   boot_signer <target> <image> <out> [--no-truncate]
   boot_signer <target> <image> <key> <cert> <out> [--no-truncate]
   boot_signer -verify <image> [-certificate <cert>]
+  boot_signer -strip <image> <out>
   boot_signer -h | --help
 
 commands:
   (default)   sign <image>, write result to <out>
   -verify     verify a signed image (exit 0 = VALID, 1 = INVALID or error)
+  -strip      remove the signature block, write the unsigned image to <out>
 
 arguments (sign):
   target  partition target recorded in the signature (e.g. /boot)
@@ -127,12 +131,21 @@ struct ParsedSig {
     target: String,
     length: i64,
     signature: Vec<u8>,
+    /// total DER size of the whole signature block (incl. its SEQUENCE header)
+    block_len: usize,
 }
 
 /// Parse BootSignature DER. Any bytes after the block are ignored, so a signed
 /// image with preserved trailing data (see --no-truncate) verifies fine.
 fn parse_boot_signature(data: &[u8]) -> Result<ParsedSig, String> {
-    let elems = der::parse_seq(data)?;
+    let outer = der::parse_tlv(data)
+        .map_err(|e| format!("signature block: bad DER: {e}"))?;
+    if outer.tag != 0x30 {
+        return Err("signature block: not a DER SEQUENCE".to_string());
+    }
+    let block_len = outer.total;
+
+    let elems = der::parse_seq(&data[..block_len])?;
     if elems.len() != 5 {
         return Err(format!(
             "signature block: expected 5 elements, got {}",
@@ -184,6 +197,7 @@ fn parse_boot_signature(data: &[u8]) -> Result<ParsedSig, String> {
         target,
         length,
         signature,
+        block_len,
     })
 }
 
@@ -330,6 +344,48 @@ fn verify_signature(image_path: &str, cert_path: &str) -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// strip
+// ---------------------------------------------------------------------------
+
+fn do_strip(image_path: &str, out_path: &str) {
+    let result = (|| -> Result<(), String> {
+        let data = read_file(image_path)?;
+        if data.is_empty() {
+            return Err("Invalid image: empty file".to_string());
+        }
+        let signable_size = bootimg::get_signable_image_size(&data)?;
+
+        if signable_size >= data.len() {
+            return Err("Invalid image: not signed (nothing to strip)".to_string());
+        }
+
+        // Locate the signature block and remove exactly that; anything behind
+        // it (preserved via --no-truncate) is kept.
+        let metadata = &data[signable_size..];
+        let sig = parse_boot_signature(metadata)
+            .map_err(|e| format!("Invalid image: cannot strip: {e}"))?;
+
+        let mut out =
+            Vec::with_capacity(signable_size + metadata.len() - sig.block_len);
+        out.extend_from_slice(&data[..signable_size]);
+        out.extend_from_slice(&metadata[sig.block_len..]);
+
+        eprintln!(
+            "NOTE: removed {}-byte signature block from {}",
+            sig.block_len, image_path
+        );
+        if out.len() != signable_size {
+            eprintln!("NOTE: kept {} trailing bytes", out.len() - signable_size);
+        }
+        write_file(out_path, &out)
+    })();
+
+    if let Err(e) = result {
+        fail(&e);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -383,6 +439,20 @@ fn main() {
             }
             let image = image.unwrap_or_else(|| usage_err("missing <image>"));
             verify_signature(image, cert.unwrap_or(""));
+        }
+        "-strip" => {
+            // -strip <image> <out>
+            let mut files: Vec<&str> = Vec::new();
+            for a in &args[1..] {
+                if a.starts_with('-') {
+                    usage_err(&format!("unknown option '{a}'"));
+                }
+                files.push(a);
+            }
+            if files.len() != 2 {
+                usage_err("-strip expects exactly two arguments: <image> <out>");
+            }
+            do_strip(files[0], files[1]);
         }
         s if s.starts_with('-') => usage_err(&format!("unknown command '{s}'")),
         _ => {
