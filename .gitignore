@@ -1,13 +1,6 @@
 # build artifacts
 /target
 /boot_signer
+
+# runtime output
 *.img
-
-# test scratch
-ft_*
-demo*
-extracted/
-BootSignature.java
-
-# tooling
-.openclaw/
