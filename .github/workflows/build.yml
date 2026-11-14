@@ -113,23 +113,32 @@ jobs:
           file "$BIN"
           ls -lh "$BIN"
 
-      # tar.gz instead of a raw upload so the executable bit survives
-      # extraction on the device.
-      - name: Package
+      # Each job contributes its binary to the final bundle under a
+      # distinct name; the package job merges the parts.
+      - name: Stage binary
         run: |
           set -euo pipefail
-          BIN=target/${{ matrix.target }}/release/boot_signer
-          NAME="boot_signer-${{ matrix.name }}"
           mkdir dist
-          cp "$BIN" "dist/$NAME"
-          chmod +x "dist/$NAME"
-          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
-          rm "dist/$NAME"
-          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          cp target/${{ matrix.target }}/release/boot_signer "dist/boot_signer-${{ matrix.name }}"
 
-      - name: Upload artifact
+      - name: Upload binary part
         uses: actions/upload-artifact@v4
         with:
-          name: boot_signer-${{ matrix.name }}
-          path: dist/
+          name: part-${{ matrix.name }}
+          path: dist/boot_signer-${{ matrix.name }}
           if-no-files-found: error
+
+  # One deliverable artifact: a single zip holding the three binaries.
+  # upload-artifact already zips its input, so the raw binaries go in
+  # as-is - no extra archive layer.
+  package:
+    name: package
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge binary parts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: boot_signer
+          pattern: part-*
+          delete-merged: true
