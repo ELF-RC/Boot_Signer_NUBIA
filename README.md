@@ -90,7 +90,7 @@ RSA→SHA256withRSA；EC 按曲线 256/384/512 位 → SHA256/384/512withECDSA�
 
 ## 验证结果
 
-对 boot header v0/v1/v2 三种镜像（golden_test.py，与原 jar 金标准对照）：
+对 boot header v0/v1/v2 三种镜像（与原 jar 金标准对照）：
 
 | 测试 | 结果 |
 |---|---|
@@ -100,15 +100,13 @@ RSA→SHA256withRSA；EC 按曲线 256/384/512 位 → SHA256/384/512withECDSA�
 | jar 检测篡改（改 1 字节）| ✅ ×3 |
 | rust 检测篡改 | ✅ ×3 |
 
-新功能与错误处理（feature_test.py，36 项）：
+新功能与错误处理（36 项检查）：
 
 | 类别 | 覆盖 |
 |---|---|
 | `-strip` | 还原原始镜像 / 剥离后重签一致 / 可逆 `--no-truncate` 产物 / 未签名镜像报错 |
 | `--no-truncate` | 尾部字节保留、位置正确、jar+rust 双向验证 |
 | 错误处理 | 参数错误×8、文件/镜像损坏×5、密钥证书不配对、坏密钥证书、缺参数、help |
-
-复跑测试：`python3 golden_test.py && python3 feature_test.py`（需 `~/.local/jdk/bin/java` + `orig/` 下的 jar 与密钥）。
 
 ## 构建
 
