@@ -1,0 +1,135 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 — built natively on the runner
+          - name: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            cross: none
+            smoke: true
+
+          # Linux aarch64 — cross-compiled with the distro aarch64 toolchain
+          - name: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            cross: gnu
+            smoke: false
+
+          # Android aarch64 (Termux) — linked against the NDK's bionic libc,
+          # API 24 is the oldest Android current Termux releases run on
+          - name: termux-aarch64
+            target: aarch64-linux-android
+            cross: android
+            smoke: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install aarch64-linux-gnu cross toolchain
+        if: matrix.cross == 'gnu'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Point cargo at the Android NDK linker (API 24)
+        if: matrix.cross == 'android'
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_HOME:-$(ls -d /usr/local/lib/android/sdk/ndk/* | sort -V | tail -1)}"
+          CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          if [ ! -x "$CLANG" ]; then
+            echo "NDK clang not found: $CLANG" >&2
+            exit 1
+          fi
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # End-to-end sanity check on runs we can execute natively:
+      # sign -> verify -> strip round-trip on a synthetic boot header.
+      - name: Smoke test (native only)
+        if: matrix.smoke
+        run: |
+          set -euo pipefail
+          BIN=target/${{ matrix.target }}/release/boot_signer
+
+          "$BIN" --help
+          "$BIN" -print-cert > cert.pem
+          head -1 cert.pem
+
+          python3 - <<'PY'
+          import struct
+          hdr = bytearray(2048)
+          hdr[0:8] = b"ANDROID!"
+          struct.pack_into("<I", hdr, 36, 2048)  # page_size
+          open("smoke.img", "wb").write(hdr)
+          PY
+
+          "$BIN" /boot smoke.img smoke_signed.img
+          "$BIN" -verify smoke_signed.img
+          "$BIN" -strip smoke_signed.img smoke_stripped.img
+          cmp smoke.img smoke_stripped.img
+
+      - name: Show binary info
+        run: |
+          set -euo pipefail
+          BIN=target/${{ matrix.target }}/release/boot_signer
+          file "$BIN"
+          ls -lh "$BIN"
+
+      # tar.gz instead of a raw upload so the executable bit survives
+      # extraction on the device.
+      - name: Package
+        run: |
+          set -euo pipefail
+          BIN=target/${{ matrix.target }}/release/boot_signer
+          NAME="boot_signer-${{ matrix.name }}"
+          mkdir dist
+          cp "$BIN" "dist/$NAME"
+          chmod +x "dist/$NAME"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          rm "dist/$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot_signer-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
